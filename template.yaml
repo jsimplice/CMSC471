@@ -1,47 +1,404 @@
+AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
+Description: CMSC 471 Final - 4-tier image-to-text application with Textract
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 512
+    Tracing: Active
+    Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+    Environment:
+      Variables:
+        INBOX_BUCKET: !Ref InboxBucket
+        STATIC_SITE_BUCKET: !Ref StaticSiteBucket
+        JOB_STATE_TABLE: !Ref JobStateTable
+        STATE_MACHINE_ARN: !Ref TextractWorkflowStateMachine
+
+# ============================================================================
+# PERSISTENCE TIER
+# ============================================================================
 Resources:
-  Api:
-    Type: AWS::Serverless::Api
+  # S3 Buckets
+  InboxBucket:
+    Type: AWS::S3::Bucket
     Properties:
-      Name: !Sub
-        - ${ResourceName} From Stack ${AWS::StackName}
-        - ResourceName: Api
-      StageName: Prod
-      DefinitionBody:
-        openapi: '3.0'
-        info: {}
-        paths:
-          /:
-            get:
-              x-amazon-apigateway-integration:
-                httpMethod: POST
-                type: aws_proxy
-                uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HelloWorldFunction.Arn}/invocations
-              responses: {}
-      EndpointConfiguration: REGIONAL
-      TracingEnabled: true
-  HelloWorldFunction:
+      BucketName: !Sub 'cmsc471-inbox-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+  
+  StaticSiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'cmsc471-static-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # DynamoDB Table for Job State
+  JobStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cmsc471-job-state
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # CloudWatch Log Groups
+  IndexHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-index-handler'
+      RetentionInDays: 14
+
+  InboxHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-inbox-handler'
+      RetentionInDays: 14
+
+  SubmitHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-submit-handler'
+      RetentionInDays: 14
+
+  PollHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-poll-handler'
+      RetentionInDays: 14
+
+  RecordsHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-records-handler'
+      RetentionInDays: 14
+
+  FetchImageLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-fetch-image'
+      RetentionInDays: 14
+
+  CallTextractLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-call-textract'
+      RetentionInDays: 14
+
+  SaveResultsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/cmsc471-save-results'
+      RetentionInDays: 14
+
+# ============================================================================
+# ORCHESTRATION TIER - Step Functions + Lambda
+# ============================================================================
+
+  # Fetch Image Step
+  FetchImageFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Description: !Sub
-        - Stack ${AWS::StackName} Function ${ResourceName}
-        - ResourceName: HelloWorldFunction
-      CodeUri: hello_Service
-      Handler: index.handler
-      Runtime: python3.13
-      MemorySize: 3008
-      Timeout: 30
-      Tracing: Active
+      FunctionName: cmsc471-fetch-image
+      CodeUri: src/fetch_image/
+      Handler: app.lambda_handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref InboxBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobStateTable
+
+  # Call Textract Step
+  CallTextractFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: cmsc471-call-textract
+      CodeUri: src/call_textract/
+      Handler: app.lambda_handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref InboxBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobStateTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - textract:DetectDocumentText
+              Resource: '*'
+
+  # Save Results Step
+  SaveResultsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: cmsc471-save-results
+      CodeUri: src/save_results/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobStateTable
+
+  # Step Functions State Machine
+  TextractWorkflowStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: cmsc471-textract-workflow
+      Type: STANDARD
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupName: !Sub '/aws/stepfunctions/cmsc471-workflow'
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource:
+                - !GetAtt FetchImageFunction.Arn
+                - !GetAtt CallTextractFunction.Arn
+                - !GetAtt SaveResultsFunction.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt JobStateTable.Arn
+      Definition:
+        Comment: Image-to-Text processing workflow
+        StartAt: FetchImage
+        States:
+          FetchImage:
+            Type: Task
+            Resource: !GetAtt FetchImageFunction.Arn
+            Next: CallTextract
+            Retry:
+              - ErrorEquals: ['States.TaskFailed']
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals: ['States.ALL']
+                Next: HandleError
+          CallTextract:
+            Type: Task
+            Resource: !GetAtt CallTextractFunction.Arn
+            Next: SaveResults
+            Retry:
+              - ErrorEquals: ['States.TaskFailed']
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals: ['States.ALL']
+                Next: HandleError
+          SaveResults:
+            Type: Task
+            Resource: !GetAtt SaveResultsFunction.Arn
+            End: true
+            Catch:
+              - ErrorEquals: ['States.ALL']
+                Next: HandleError
+          HandleError:
+            Type: Task
+            Resource: arn:aws:states:::dynamodb:updateItem
+            Parameters:
+              TableName: !Ref JobStateTable
+              Key:
+                jobId:
+                  S.$: $.jobId
+              AttributeUpdates:
+                status:
+                  Value:
+                    S: FAILED
+                  Action: PUT
+                error:
+                  Value:
+                    S.$: $.errorMessage
+                  Action: PUT
+            End: true
+
+  TextractWorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/cmsc471-workflow'
+      RetentionInDays: 14
+
+# ============================================================================
+# COMPUTE TIER - API + Lambda Handlers
+# ============================================================================
+
+  IndexHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: cmsc471-index-handler
+      CodeUri: src/index_handler/
+      Handler: app.lambda_handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref StaticSiteBucket
       Events:
-        ApiGET:
+        GetIndex:
           Type: Api
           Properties:
+            RestApiId: !Ref ApiGateway
             Path: /
             Method: GET
-            RestApiId: !Ref Api
-      Environment: {}
-  HelloWorldFunctionLogGroup:
-    Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
+
+  InboxHandler:
+    Type: AWS::Serverless::Function
     Properties:
-      LogGroupName: !Sub /aws/lambda/${HelloWorldFunction}
+      FunctionName: cmsc471-inbox-handler
+      CodeUri: src/inbox_handler/
+      Handler: app.lambda_handler
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref InboxBucket
+      Events:
+        PostInbox:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /api/inbox
+            Method: POST
+        GetInbox:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /api/inbox
+            Method: GET
+        DeleteInbox:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /api/inbox/{key}
+            Method: DELETE
+
+  SubmitHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: cmsc471-submit-handler
+      CodeUri: src/submit_handler/
+      Handler: app.lambda_handler
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineArn: !Ref TextractWorkflowStateMachine
+      Events:
+        PostJobs:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /api/jobs
+            Method: POST
+
+  PollHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: cmsc471-poll-handler
+      CodeUri: src/poll_handler/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref JobStateTable
+      Events:
+        GetJob:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /api/jobs/{id}
+            Method: GET
+
+  RecordsHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: cmsc471-records-handler
+      CodeUri: src/records_handler/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobStateTable
+      Events:
+        GetRecords:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /api/records
+            Method: GET
+        DeleteRecord:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /api/records/{id}
+            Method: DELETE
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Name: cmsc471-api
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: false
+
+# ============================================================================
+# PRESENTATION TIER
+# ============================================================================
+
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/cmsc471-api'
+      RetentionInDays: 14
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/Prod'
+  
+  InboxBucketName:
+    Description: S3 bucket for image inbox
+    Value: !Ref InboxBucket
+  
+  StaticSiteBucketName:
+    Description: S3 bucket for static site
+    Value: !Ref StaticSiteBucket
+  
+  JobStateTableName:
+    Description: DynamoDB table for job state
+    Value: !Ref JobStateTable
+  
+  StateMachineArn:
+    Description: Step Functions state machine ARN
+    Value: !Ref TextractWorkflowStateMachine

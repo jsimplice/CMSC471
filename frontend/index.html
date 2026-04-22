@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image-to-Text Extractor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Image-to-Text Extractor</h1>
+            <p>Upload an image to extract text using AWS Textract</p>
+        </header>
+
+        <section class="upload-section">
+            <input type="file" id="imageInput" accept="image/*" required>
+            <button id="uploadBtn" onclick="uploadImage()">Upload & Process</button>
+        </section>
+
+        <section id="jobStatus" class="job-status hidden">
+            <h3>Job Status</h3>
+            <p>Job ID: <span id="jobId"></span></p>
+            <p>Status: <span id="status"></span></p>
+            <div id="statusMessage"></div>
+        </section>
+
+        <section id="results" class="results hidden">
+            <h3>Extracted Text</h3>
+            <textarea id="extractedText" readonly></textarea>
+            <button onclick="downloadResults()">Download Results</button>
+            <button onclick="deleteResult()">Delete Record</button>
+        </section>
+
+        <section id="records" class="records">
+            <h3>Previous Records</h3>
+            <div id="recordsList"></div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
