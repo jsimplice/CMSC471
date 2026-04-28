@@ -2,9 +2,9 @@ version = 0.1
 [default]
 [default.deploy]
 [default.deploy.parameters]
-stack_name = "cmsc471-final"
-s3_bucket = "cmsc471-artifacts"
-s3_prefix = "sam-artifacts"
-region = "us-east-1"
-confirm_changeset = true
-capabilities = "CAPABILITY_IAM"
+stack_name          = "cmsc471-final"
+resolve_s3          = true
+region              = "us-east-1"
+confirm_changeset   = true
+capabilities        = "CAPABILITY_IAM"
+parameter_overrides = "DBPassword=Cmsc471Lab!"

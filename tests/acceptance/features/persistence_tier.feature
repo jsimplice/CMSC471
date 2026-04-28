@@ -23,3 +23,10 @@ Feature: Persistence Tier - Data Storage
     Then the S3 bucket "StaticSiteBucket" must exist
     And the bucket must be encrypted with AES256
     And the bucket must have public access blocked
+
+  Scenario: Verify RDS MySQL results database exists (S10)
+    Given the SAM template is initialized
+    Then the RDS instance "ResultsDatabase" must exist in the template
+    And the database must be named "cmsc471results"
+    And the database engine must be "mysql"
+    And the database must reside in private subnets

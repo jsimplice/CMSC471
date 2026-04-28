@@ -1,43 +1,50 @@
 import json
-import boto3
 import os
+
+import boto3
 
 dynamodb = boto3.resource('dynamodb')
 
-JOB_STATE_TABLE = os.environ.get('JOB_STATE_TABLE')
+JOB_STATE_TABLE = os.environ['JOB_STATE_TABLE']
 table = dynamodb.Table(JOB_STATE_TABLE)
 
+CORS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+}
+
+
 def lambda_handler(event, context):
-    """
-    GET /api/jobs/{id} - Poll job status
-    """
     try:
         job_id = event['pathParameters']['id']
-        
-        response = table.get_item(Key={'jobId': job_id})
-        
-        if 'Item' not in response:
+
+        resp = table.get_item(Key={'jobId': job_id})
+
+        if 'Item' not in resp:
             return {
                 'statusCode': 404,
-                'body': json.dumps({'error': 'Job not found'})
+                'headers': CORS,
+                'body': json.dumps({'error': 'Job not found'}),
             }
-        
-        item = response['Item']
-        
+
+        item = resp['Item']
+
         return {
             'statusCode': 200,
-            'headers': {'Content-Type': 'application/json'},
+            'headers': {**CORS, 'Content-Type': 'application/json'},
             'body': json.dumps({
                 'jobId': item['jobId'],
                 'status': item.get('status', 'PROCESSING'),
                 'extractedText': item.get('extractedText', ''),
-                'createdAt': item.get('createdAt')
-            })
+                'createdAt': item.get('createdAt'),
+            }),
         }
-    
+
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f'Error: {e}')
         return {
             'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
+            'headers': CORS,
+            'body': json.dumps({'error': str(e)}),
         }

@@ -8,6 +8,8 @@ from pytest_bdd import scenarios, given, when, then, parsers
 scenarios('../features/persistence_tier.feature')
 scenarios('../features/api_endpoints.feature')
 scenarios('../features/orchestration_tier.feature')
+scenarios('../features/vpc_network.feature')
+scenarios('../features/edge_tier.feature')
 
 # Initialize AWS clients
 cfn = boto3.client('cloudformation')
@@ -378,7 +380,136 @@ def verify_lambda_exists(context, function_name):
 
 @then("the function must have textract:DetectDocumentText permission")
 def verify_textract_permission(context):
-    """Verify Textract permission"""
+    # Policies blocks were removed — LabRole grants textract:DetectDocumentText.
     template = context['template']
-    textract_function = template['Resources']['CallTextractFunction']
-    assert 'Policies' in textract_function['Properties']
+    fn = template['Resources']['CallTextractFunction']
+    role = str(fn['Properties'].get('Role', ''))
+    assert 'LabRole' in role, "CallTextractFunction should use LabRole (grants Textract)"
+
+
+# ============================================================================
+# THEN Steps - VPC Network (S1, S2, S3)
+# ============================================================================
+
+@then(parsers.parse('the AWS::EC2::VPC resource must have CidrBlock "{cidr}"'))
+def verify_vpc_cidr(context, cidr):
+    template = context['template']
+    vpcs = [v for v in template['Resources'].values() if v['Type'] == 'AWS::EC2::VPC']
+    assert vpcs, "No AWS::EC2::VPC resource found in template"
+    assert any(v['Properties']['CidrBlock'] == cidr for v in vpcs)
+
+
+@then(parsers.parse("the template must define {count:d} public subnets"))
+def verify_public_subnets(context, count):
+    template = context['template']
+    public = [
+        r for r in template['Resources'].values()
+        if r['Type'] == 'AWS::EC2::Subnet'
+        and r.get('Properties', {}).get('MapPublicIpOnLaunch') is True
+    ]
+    assert len(public) >= count, f"Expected {count} public subnets, found {len(public)}"
+
+
+@then(parsers.parse("the template must define {count:d} private subnets"))
+def verify_private_subnets(context, count):
+    template = context['template']
+    private = [
+        r for r in template['Resources'].values()
+        if r['Type'] == 'AWS::EC2::Subnet'
+        and not r.get('Properties', {}).get('MapPublicIpOnLaunch', False)
+    ]
+    assert len(private) >= count, f"Expected {count} private subnets, found {len(private)}"
+
+
+@then("the template must define an AWS::EC2::NatGateway resource")
+def verify_nat_gateway_exists(context):
+    template = context['template']
+    nats = [r for r in template['Resources'].values() if r['Type'] == 'AWS::EC2::NatGateway']
+    assert nats, "No AWS::EC2::NatGateway resource found in template"
+
+
+@then("the NAT Gateway must be in a public subnet")
+def verify_nat_in_public_subnet(context):
+    template = context['template']
+    nat = next(
+        (r for r in template['Resources'].values() if r['Type'] == 'AWS::EC2::NatGateway'),
+        None
+    )
+    assert nat is not None
+    subnet_ref = nat['Properties']['SubnetId'].get('Ref')
+    if subnet_ref:
+        subnet = template['Resources'][subnet_ref]
+        assert subnet['Properties'].get('MapPublicIpOnLaunch') is True
+
+
+# ============================================================================
+# THEN Steps - Edge Tier (S4, S5)
+# ============================================================================
+
+@then("the template must define an IndexHandler Lambda")
+def verify_index_handler_exists(context):
+    template = context['template']
+    assert 'IndexHandler' in template['Resources']
+
+
+@then("the IndexHandler must handle GET / events")
+def verify_index_handler_events(context):
+    template = context['template']
+    handler = template['Resources']['IndexHandler']
+    events = handler['Properties'].get('Events', {})
+    get_root = any(
+        e.get('Properties', {}).get('Method', '').upper() == 'GET'
+        and e.get('Properties', {}).get('Path') == '/'
+        for e in events.values()
+    )
+    assert get_root, "IndexHandler has no GET / event"
+
+
+@then("the IndexHandler must read from the StaticSiteBucket")
+def verify_index_handler_reads_s3(context):
+    # Policies blocks were removed — all functions use LabRole which grants S3 access.
+    template = context['template']
+    handler = template['Resources']['IndexHandler']
+    role = str(handler['Properties'].get('Role', ''))
+    assert 'LabRole' in role, "IndexHandler should use LabRole (grants S3 read on cmsc471-* buckets)"
+
+
+# ============================================================================
+# THEN Steps - RDS / Persistence (S10)
+# ============================================================================
+
+@then(parsers.parse('the RDS instance "{resource_name}" must exist in the template'))
+def verify_rds_exists(context, resource_name):
+    template = context['template']
+    assert resource_name in template['Resources'], f"{resource_name} not found in template"
+    assert template['Resources'][resource_name]['Type'] == 'AWS::RDS::DBInstance'
+
+
+@then(parsers.parse('the database must be named "{db_name}"'))
+def verify_db_name(context, db_name):
+    template = context['template']
+    rds = template['Resources']['ResultsDatabase']
+    assert rds['Properties']['DBName'] == db_name
+
+
+@then(parsers.parse('the database engine must be "{engine}"'))
+def verify_db_engine(context, engine):
+    template = context['template']
+    rds = template['Resources']['ResultsDatabase']
+    assert rds['Properties']['Engine'].lower() == engine.lower()
+
+
+@then("the database must reside in private subnets")
+def verify_db_in_private_subnets(context):
+    template = context['template']
+    rds = template['Resources']['ResultsDatabase']
+    subnet_group_ref = rds['Properties']['DBSubnetGroupName'].get('Ref')
+    assert subnet_group_ref is not None
+    subnet_group = template['Resources'][subnet_group_ref]
+    subnet_ids = subnet_group['Properties']['SubnetIds']
+    for sid in subnet_ids:
+        ref = sid.get('Ref')
+        if ref:
+            subnet = template['Resources'][ref]
+            assert not subnet['Properties'].get('MapPublicIpOnLaunch', False), \
+                f"Subnet {ref} is public — RDS should be in private subnets"

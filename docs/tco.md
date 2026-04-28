@@ -130,6 +130,37 @@ This document analyzes the cost of running a serverless image-to-text applicatio
 
 ---
 
+### 8. NAT Gateway
+
+**Pricing Model:** $0.045/hr + $0.045/GB data processed
+
+**Monthly:**
+- Hourly charge: $0.045 × 720 hrs = **$32.40/month** (idle — no data needed)
+- Data processed by 1,000 jobs × ~2 MB × $0.045/GB ≈ **$0.09/month**
+
+**Total NAT Gateway/month:** ~**$32.50**
+
+> **Warning:** This is the dominant *idle* cost. The NAT Gateway charges by the
+> hour whether or not traffic flows. Delete the stack at the end of every lab
+> session or it will drain ~$32 of Learner Lab credits per month.
+
+---
+
+### 9. RDS MySQL db.t3.micro
+
+**Pricing Model:** $0.017/hr (us-east-1, Single-AZ, gp2 storage)
+
+**Monthly:**
+- Instance hours: $0.017 × 720 hrs = **$12.24/month**
+- Storage (20 GB gp2): 20 × $0.115 / 12 = **$0.19/month**
+
+**Total RDS/month:** ~**$12.43**
+
+> **Warning:** Like the NAT Gateway, RDS charges by the hour when idle.
+> Together, NAT + RDS = **~$44/month** of fixed idle cost.
+
+---
+
 ## Monthly & Annual Cost Summary
 
 | Service | Monthly | Annual |
@@ -141,7 +172,9 @@ This document analyzes the cost of running a serverless image-to-text applicatio
 | Step Functions | $0.075 | $0.90 |
 | API Gateway | $0.0175 | $0.21 |
 | CloudWatch | $0.27 | $3.24 |
-| **TOTAL** | **~$57.25** | **~$183** |
+| NAT Gateway | $32.50 | $390 |
+| RDS db.t3.micro | $12.43 | $149 |
+| **TOTAL** | **~$102** | **~$722** |
 
 **Note:** After S3 Glacier transition (30 days), monthly cost drops to ~$10 as archived images cost 80% less.
 
