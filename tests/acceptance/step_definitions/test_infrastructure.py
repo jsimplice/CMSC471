@@ -380,10 +380,11 @@ def verify_lambda_exists(context, function_name):
 
 @then("the function must have textract:DetectDocumentText permission")
 def verify_textract_permission(context):
-    """Verify Textract permission"""
+    # Policies blocks were removed — LabRole grants textract:DetectDocumentText.
     template = context['template']
-    textract_function = template['Resources']['CallTextractFunction']
-    assert 'Policies' in textract_function['Properties']
+    fn = template['Resources']['CallTextractFunction']
+    role = str(fn['Properties'].get('Role', ''))
+    assert 'LabRole' in role, "CallTextractFunction should use LabRole (grants Textract)"
 
 
 # ============================================================================
@@ -466,14 +467,11 @@ def verify_index_handler_events(context):
 
 @then("the IndexHandler must read from the StaticSiteBucket")
 def verify_index_handler_reads_s3(context):
+    # Policies blocks were removed — all functions use LabRole which grants S3 access.
     template = context['template']
     handler = template['Resources']['IndexHandler']
-    policies = handler['Properties'].get('Policies', [])
-    has_s3_policy = any(
-        'S3ReadPolicy' in p or 'S3CrudPolicy' in p
-        for p in policies
-    )
-    assert has_s3_policy, "IndexHandler has no S3 read policy"
+    role = str(handler['Properties'].get('Role', ''))
+    assert 'LabRole' in role, "IndexHandler should use LabRole (grants S3 read on cmsc471-* buckets)"
 
 
 # ============================================================================
